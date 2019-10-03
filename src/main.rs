@@ -17,23 +17,29 @@ fn main() {
         LsProcess::start().expect("Language server failed to start"),
     ));
 
-    let lsp_filter = warp::any().map(move || lsp.clone());
-    let debug_route = lsp_filter
+    let lsp_filter = cloner(warp::any().map(move || lsp.clone()));
+    let debug_route = lsp_filter()
         .and(warp::path("debug"))
         .and(warp::get2())
         .map(handle_debug);
-    let routes = debug_route; // or...
+    let symbols_route = lsp_filter()
+        .and(warp::path("symbols"))
+        .and(warp::get2())
+        .map(handle_symbols);
+    let routes = debug_route.or(symbols_route); // or...
     const PORT: u16 = 8100;
-    let allowed_hosts = [
-        "127.0.0.1".to_string(),
-        "localhost".to_string(),
-        format!("127.0.0.1:{}", PORT),
-        format!("localhost:{}", PORT),
-    ];
+    let allowed_hosts = [format!("127.0.0.1:{}", PORT), format!("localhost:{}", PORT)];
     let app = host_filter(move |host: &str| allowed_hosts.iter().any(|h| h == host)).and(routes);
 
     log::info!("Serving");
     warp::serve(app).run(([127, 0, 0, 1], PORT));
+}
+
+fn cloner<T>(cl: T) -> impl Fn() -> T
+where
+    T: Clone,
+{
+    move || cl.clone()
 }
 
 fn host_filter<'a, F>(hostp: F) -> warp::filters::BoxedFilter<()>
@@ -52,6 +58,11 @@ where
         .boxed()
 }
 
+fn handle_symbols(lsp: Lsp) -> impl Reply {
+    let lsp = lsp.lock().expect("lock failure");
+    "Foo"
+}
+
 fn handle_debug(lsp: Lsp) -> impl Reply {
     let lsp = lsp.lock().expect("lock failure");
     let resp = format!(
@@ -63,7 +74,7 @@ fn handle_debug(lsp: Lsp) -> impl Reply {
     </head>
     <body>
         <pre>
-    language server pid: {}
+language server pid: {}
         </pre>
     </body>
     </html>
@@ -98,6 +109,7 @@ impl LsProcess {
                 seqnum: 0,
             }
         };
+        log::trace!("Language server process started, pid {}", lsp.pid());
 
         let cwd = std::env::current_dir().unwrap();
         let workspace_dir: &str = cwd.to_str().unwrap();
@@ -108,11 +120,10 @@ impl LsProcess {
         };
         lsp.seqnum += 1;
 
-        let init_json = serde_json::to_value(init_req).unwrap();
+        let init_json = serde_json::to_value(&init_req).unwrap();
         use std::io::Write;
         let stdin = &mut lsp.stdin;
         let req = wrap_ls_request(&init_json).unwrap();
-        log::trace!("writing request:\n{}", req);
         write!(stdin, "{}", req)?;
         stdin.flush().unwrap();
 
@@ -124,13 +135,17 @@ impl LsProcess {
         let mut read_buf = vec![0u8; content_len];
         lsp.buf_stdout.read_exact(&mut read_buf)?;
         let res: RpcResponse = serde_json::from_slice(&read_buf).unwrap();
-        log::trace!("RpcResponse:\n\n{:#?}", res);
-        // log::trace!("Json:\n\n{}", String::from_utf8(read_buf).unwrap());
+        // Sanity tests
+        assert_eq!(Some(init_req.id), res.id);
+        res.payload.into_result().expect("Initialize error");
 
+        log::trace!("Language server initialized");
+
+        // FIXME: This should be moved onto a separate thread, because
+        // server->client notifications means we need to be constantly
+        // reading from the server process's stdout.
         Ok(lsp)
     }
-
-    // fn write_request(&mut self, method: &'static str, params: serde_json::Value) {}
 
     pub fn pid(&self) -> u32 {
         self.proc.id()
@@ -148,7 +163,6 @@ fn parse_content_length(line: &str) -> Option<usize> {
     let needle = "Content-Length: ";
     let mid = line.find(needle)? + needle.len();
     let (_, num) = line.split_at(mid);
-    println!("num: {}", num);
     num.parse().ok()
 }
 
@@ -177,6 +191,15 @@ enum ResponsePayload {
     Result(serde_json::Value),
     #[serde(rename = "error")]
     Error(RpcError),
+}
+
+impl ResponsePayload {
+    fn into_result(self) -> Result<serde_json::Value, RpcError> {
+        match self {
+            ResponsePayload::Result(val) => Ok(val),
+            ResponsePayload::Error(err) => Err(err),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
