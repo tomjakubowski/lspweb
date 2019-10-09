@@ -14,7 +14,8 @@ pub type Lsp = Arc<LsClient>;
 fn main() {
     env_logger::init();
     // Initialize language server process
-    let lsp = Arc::new(LsClient::start().expect("Language server failed to start"));
+    let cwd = std::env::current_dir().unwrap();
+    let lsp = Arc::new(LsClient::start(&cwd).expect("Language server failed to start"));
 
     let lsp_filter = cloner(warp::any().map(move || lsp.clone()));
     let debug_route = lsp_filter()
@@ -32,7 +33,7 @@ fn main() {
     let allowed_hosts = [format!("127.0.0.1:{}", PORT), format!("localhost:{}", PORT)];
     let app = host_filter(move |host: &str| allowed_hosts.iter().any(|h| h == host)).and(routes);
 
-    log::info!("Serving");
+    log::info!("Serving on http://localhost:8100/");
     warp::serve(app).run(([127, 0, 0, 1], PORT));
 }
 
@@ -61,11 +62,12 @@ where
 
 #[derive(Deserialize)]
 struct GenericQuery {
-    q: String,
+    q: Option<String>,
 }
 
 fn handle_workspace_symbol(lsp: Lsp, query: GenericQuery) -> impl Reply {
-    let symbols = lsp.workspace_symbol(&query.q).unwrap().unwrap();
+    let query = query.q.unwrap_or_default();
+    let symbols = lsp.workspace_symbol(&query).unwrap().unwrap();
     let symbol_list = symbols
         .into_iter()
         .map(|sym| format!("{:?}", sym))
@@ -77,7 +79,7 @@ fn handle_workspace_symbol(lsp: Lsp, query: GenericQuery) -> impl Reply {
     <!doctype html>
     <html>
     <head>
-        <title>debug</title>
+        <title>workspace symbols</title>
     </head>
     <body>
         <form method="get">
@@ -91,7 +93,7 @@ fn handle_workspace_symbol(lsp: Lsp, query: GenericQuery) -> impl Reply {
     </body>
     </html>
     "#,
-        query = query.q,
+        query = query,
         symbols = symbol_list
     );
     warp::reply::html(resp)

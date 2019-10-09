@@ -10,6 +10,7 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     io::{self, BufReader},
+    path::Path,
     process::{self, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread::JoinHandle,
@@ -45,7 +46,8 @@ pub enum CallError {
 pub type CallResult<R> = Result<ReqResult<R>, CallError>;
 
 impl LsClient {
-    pub fn start() -> io::Result<LsClient> {
+    pub fn start(project_dir: &Path) -> io::Result<LsClient> {
+        assert!(project_dir.is_dir());
         let mut server = Command::new("ra_lsp_server")
             .stdin(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -149,10 +151,9 @@ impl LsClient {
             writer_tx,
         };
 
-        let cwd = std::env::current_dir().unwrap();
-        let workspace_dir: &str = cwd.to_str().unwrap();
+        let project_dir = project_dir.to_str().unwrap();
         client
-            .call::<lsp_request!("initialize")>(initialize_params(workspace_dir))
+            .call::<lsp_request!("initialize")>(initialize_params(project_dir))
             .unwrap();
 
         client.notify::<lsp_notification!("initialized")>(InitializedParams {});
