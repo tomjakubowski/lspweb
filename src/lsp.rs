@@ -10,15 +10,18 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     io::{self, BufReader},
-    path::Path,
+    path::{Path, PathBuf},
     process::{self, Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
     thread::JoinHandle,
 };
 
+use crate::lsp_call;
+
 pub struct LsClient {
     request_counter: AtomicU64,
     process: process::Child,
+    project_dir: PathBuf,
     reader_thread: JoinHandle<()>,
     readerctl_tx: Sender<ReaderControl>,
     writer_thread: JoinHandle<()>,
@@ -142,18 +145,20 @@ impl LsClient {
             }
         });
 
+        let project_dir = project_dir.into();
         let client = LsClient {
             request_counter: 0.into(),
             process: server,
+            project_dir,
             reader_thread,
             readerctl_tx,
             writer_thread,
             writer_tx,
         };
 
-        let project_dir = project_dir.to_str().unwrap();
+        let project_dir_str = client.project_dir.to_str().unwrap();
         client
-            .call::<lsp_request!("initialize")>(initialize_params(project_dir))
+            .call::<lsp_request!("initialize")>(initialize_params(project_dir_str))
             .unwrap();
 
         client.notify::<lsp_notification!("initialized")>(InitializedParams {});
@@ -182,10 +187,7 @@ impl LsClient {
     }
 
     pub fn workspace_symbol(&self, query: &str) -> CallResult<lsp_request!("workspace/symbol")> {
-        type Req = lsp_request!("workspace/symbol");
-        self.call::<Req>(ReqParams::<Req> {
-            query: query.to_string(),
-        })
+        lsp_call!(self, "workspace/symbol", { query: query.to_string() })
     }
 
     pub fn notify<N>(&self, params: NotifyParams<N>)
@@ -199,6 +201,10 @@ impl LsClient {
 
     pub fn pid(&self) -> u32 {
         self.process.id()
+    }
+
+    pub fn project_dir(&self) -> &Path {
+        &self.project_dir
     }
 
     fn next_request_id(&self) -> u64 {

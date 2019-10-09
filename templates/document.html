@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>{{path}}</title>
+  </head>
+  <body>
+    <h2 style="text-align: center"><code>{{path}}</code></h2>
+    <pre>{{content}}</pre>
+    <h2>symbols</h2>
+    <pre>{{symbols | json_encode(pretty=true) }}</pre>
+  </body>
+</html>

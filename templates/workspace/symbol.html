@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <title>workspace symbols</title>
+  </head>
+  <body>
+    <form method="get">
+      <label for="q">Search: </label>
+      <input type="text" name="q" value="{{query}}" />
+    </form>
+    <h2>symbols</h2>
+    <ul>
+{% for symbol in symbols %}
+<li><code>{{symbol.name}} ({{symbol.location.uri}})</code></li>
+{% endfor %}
+    </ul>
+
+    <pre>
+{{ symbols | json_encode(pretty=true) }}
+    </pre>
+  </body>
+</html>
