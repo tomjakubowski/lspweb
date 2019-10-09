@@ -29,7 +29,7 @@ enum ReaderControl {
 }
 enum WriterControl {
     Write(RawJsonRpc),
-    Shutdown,
+    Exit,
 }
 
 pub type ReqParams<R> = <R as Request>::Params;
@@ -62,7 +62,7 @@ impl LsClient {
                 Ok(m) => m,
                 Err(e) => {
                     log::error!("writer_rx recv(): {}", e);
-                    break;
+                    return;
                 }
             };
             match msg {
@@ -79,9 +79,9 @@ impl LsClient {
                     .unwrap();
                     server_stdin.flush().unwrap();
                 }
-                WriterControl::Shutdown => {
-                    log::trace!("Shutting down writer thread");
-                    break;
+                WriterControl::Exit => {
+                    log::trace!("Exiting writer thread");
+                    return;
                 }
             }
         });
