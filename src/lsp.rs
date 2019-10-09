@@ -1,6 +1,9 @@
 use channel::Sender;
 use crossbeam::channel;
-use lsp_types::{self, lsp_request, request::Request};
+use lsp_types::{
+    self, lsp_notification, lsp_request, notification::Notification, request::Request,
+    InitializeParams, InitializedParams,
+};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::Value as Json;
@@ -27,8 +30,9 @@ enum WriterControl {
     Shutdown,
 }
 
-pub type LspParams<R> = <R as Request>::Params;
-pub type LspResult<R> = <R as Request>::Result;
+pub type ReqParams<R> = <R as Request>::Params;
+pub type ReqResult<R> = <R as Request>::Result;
+pub type NotifyParams<N> = <N as Notification>::Params;
 
 #[derive(Debug)]
 pub enum CallError {
@@ -36,7 +40,7 @@ pub enum CallError {
     IoError(io::Error),
 }
 
-pub type CallResult<R> = Result<LspResult<R>, CallError>;
+pub type CallResult<R> = Result<ReqResult<R>, CallError>;
 
 impl LsClient {
     pub fn start() -> io::Result<LsClient> {
@@ -92,6 +96,7 @@ impl LsClient {
             server_stdout.read_line(&mut read_buf).unwrap();
             let mut read_buf = vec![0u8; content_len];
             server_stdout.read_exact(&mut read_buf).unwrap();
+            log::trace!("{:?}", std::str::from_utf8(&read_buf).unwrap());
             let res: RpcResponse = serde_json::from_slice(&read_buf).unwrap();
             match res.id {
                 None => {
@@ -136,18 +141,20 @@ impl LsClient {
         client
             .call::<lsp_request!("initialize")>(initialize_params(workspace_dir))
             .unwrap();
+
+        client.notify::<lsp_notification!("initialized")>(InitializedParams {});
         Ok(client)
     }
 
-    pub fn call<M>(&self, params: LspParams<M>) -> CallResult<M>
+    pub fn call<M>(&self, params: ReqParams<M>) -> CallResult<M>
     where
         M: Request,
-        for<'de> LspResult<M>: Deserialize<'de>,
-        LspParams<M>: Serialize,
+        for<'de> ReqResult<M>: Deserialize<'de>,
+        ReqParams<M>: Serialize,
     {
         let id = self.next_id();
         let request = RpcRequest {
-            id,
+            id: Some(id),
             method: M::METHOD,
             params: serde_json::to_value(params).unwrap(),
         };
@@ -160,6 +167,21 @@ impl LsClient {
             .unwrap();
         let res = res_rx.recv().unwrap().payload;
         res.into_call_result::<M>()
+    }
+
+    pub fn notify<N>(&self, params: NotifyParams<N>)
+    where
+        N: Notification,
+        NotifyParams<N>: Serialize,
+    {
+        let request = RpcRequest {
+            id: None,
+            method: N::METHOD,
+            params: serde_json::to_value(params).unwrap(),
+        };
+        self.writer_tx
+            .send(WriterControl::Request(request))
+            .unwrap();
     }
 
     pub fn pid(&self) -> u32 {
@@ -187,7 +209,8 @@ fn test_parse_content_length() {
 
 #[derive(Debug, Serialize)]
 struct RpcRequest {
-    id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<u64>,
     method: &'static str,
     params: Json,
 }
@@ -217,7 +240,7 @@ impl ResponsePayload {
     fn into_call_result<M>(self) -> CallResult<M>
     where
         M: Request,
-        for<'de> LspResult<M>: Deserialize<'de>,
+        for<'de> ReqResult<M>: Deserialize<'de>,
     {
         match self {
             ResponsePayload::Result(val) => Ok(serde_json::from_value(val).unwrap()),
@@ -266,8 +289,8 @@ fn test_deserialize_rpc_response() {
     );
 }
 
-fn initialize_params(workspace_path: &str) -> lsp_types::InitializeParams {
-    use lsp_types::{ClientCapabilities, InitializeParams, TraceOption, Url};
+fn initialize_params(workspace_path: &str) -> InitializeParams {
+    use lsp_types::{ClientCapabilities, TraceOption, Url};
     let mut url = Url::parse("file:///").unwrap();
     url.set_path(workspace_path);
     InitializeParams {
