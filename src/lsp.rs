@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::Value as Json;
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     io::{self, BufReader},
     process::{self, Command, Stdio},
@@ -222,6 +223,82 @@ struct RpcNotification {
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
+/// A raw JSON-RPC 2.0 message
+struct RawJsonRpc {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(flatten)]
+    payload: JsonRpcPayload,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+#[serde(untagged)]
+enum JsonRpcPayload {
+    Call {
+        method: Cow<'static, str>,
+        params: Json,
+    },
+    Result {
+        result: Json,
+    },
+    Error {
+        error: RpcError,
+    },
+}
+
+impl JsonRpcPayload {
+    fn call<P>(method: &'static str, params: P) -> JsonRpcPayload
+    where
+        P: Serialize,
+    {
+        JsonRpcPayload::Call {
+            method: Cow::Borrowed(method),
+            params: serde_json::to_value(params).unwrap(),
+        }
+    }
+
+    fn result<R>(result: R) -> JsonRpcPayload
+    where
+        R: Serialize,
+    {
+        JsonRpcPayload::Result {
+            result: serde_json::to_value(result).unwrap(),
+        }
+    }
+
+    fn error(error: RpcError) -> JsonRpcPayload {
+        JsonRpcPayload::Error { error }
+    }
+}
+
+impl Serialize for RawJsonRpc {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("jsonrpc", "2.0")?;
+        if let Some(id) = &self.id {
+            map.serialize_entry("id", &id)?;
+        }
+        match &self.payload {
+            JsonRpcPayload::Call { method, params } => {
+                map.serialize_entry("method", method)?;
+                map.serialize_entry("params", params)?;
+            }
+            JsonRpcPayload::Result { result } => {
+                map.serialize_entry("result", result)?;
+            }
+            JsonRpcPayload::Error { error } => {
+                map.serialize_entry("error", error)?;
+            }
+        }
+        map.end()
+    }
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
 struct RpcResponse {
     id: Option<u64>,
     #[serde(flatten)]
@@ -249,10 +326,44 @@ impl ResponsePayload {
     }
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
 pub struct RpcError {
     code: i64,
     message: String,
+}
+
+#[test]
+fn test_raw_jsonrpc_deserialize() {
+    let json = r#"{
+      "jsonrpc": "2.0",
+      "id": 69,
+      "result": "nice"
+    }"#;
+    assert_eq!(
+        RawJsonRpc {
+            id: Some(69),
+            payload: JsonRpcPayload::result("nice"),
+        },
+        serde_json::from_str(json).unwrap()
+    );
+    let json = r#"{
+      "jsonrpc": "2.0",
+      "id": 69,
+      "error": {
+        "code": -420,
+        "message": "not nice"
+      }
+    }"#;
+    assert_eq!(
+        RawJsonRpc {
+            id: Some(69),
+            payload: JsonRpcPayload::error(RpcError {
+                code: -420,
+                message: "not nice".to_string()
+            })
+        },
+        serde_json::from_str(json).unwrap()
+    );
 }
 
 #[test]
