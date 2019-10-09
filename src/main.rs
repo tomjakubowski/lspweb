@@ -15,16 +15,16 @@ pub type Lsp = Arc<LsClient>;
 
 fn main() {
     env_logger::init();
-    // Initialize language server process
     let cwd = std::env::current_dir().unwrap();
     let lsp = Arc::new(LsClient::start(&cwd).expect("Language server failed to start"));
     let tera = Arc::new(templates::make_tera());
-
     let lsp_filter = cloner(warp::any().map(move || lsp.clone()));
     let tera_filter = cloner(warp::any().map(move || tera.clone()));
+
     let debug_route = path!("debug")
         .and(warp::path::end())
         .and(lsp_filter())
+        .and(tera_filter())
         .and(warp::get2())
         .map(handle_debug);
     let doc_route = path!("d")
@@ -118,22 +118,9 @@ fn handle_document(tail: warp::path::Tail, lsp: Lsp, tera: Arc<Tera>) -> impl Re
     warp::reply::html(resp)
 }
 
-fn handle_debug(lsp: Lsp) -> impl Reply {
-    let resp = format!(
-        r#"
-    <!doctype html>
-    <html>
-    <head>
-        <title>debug</title>
-    </head>
-    <body>
-        <pre>
-language server pid: {}
-        </pre>
-    </body>
-    </html>
-    "#,
-        lsp.pid()
-    );
+fn handle_debug(lsp: Lsp, tera: Arc<Tera>) -> impl Reply {
+    let mut ctxt = TeraContext::new();
+    ctxt.insert("pid", &lsp.pid());
+    let resp = tera.render("debug.html", ctxt).expect("Template error");
     warp::reply::html(resp)
 }
