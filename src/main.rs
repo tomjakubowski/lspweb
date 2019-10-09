@@ -1,13 +1,7 @@
+#![warn(clippy::all)]
 #![deny(private_in_public)]
 
-use lsp_types;
-use serde::{Deserialize, Serialize};
-use serde_json;
-use std::{
-    io::{self, BufReader},
-    process::{self, Command, Stdio},
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 use warp::{self, Filter, Reply};
 
 mod lsp;
@@ -48,7 +42,7 @@ where
     move || cl.clone()
 }
 
-fn host_filter<'a, F>(hostp: F) -> warp::filters::BoxedFilter<()>
+fn host_filter<F>(hostp: F) -> warp::filters::BoxedFilter<()>
 where
     F: Fn(&str) -> bool + Clone + Send + Sync + 'static,
 {
@@ -65,7 +59,7 @@ where
 }
 
 fn handle_symbols(lsp: Lsp) -> impl Reply {
-    let lsp = lsp.lock().expect("lock failure");
+    let _lsp = lsp.lock().expect("lock failure");
     "Foo"
 }
 

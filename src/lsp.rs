@@ -1,16 +1,15 @@
-use crossbeam::{channel, TryRecvError};
-use lsp_types::{self, request::Request};
+use channel::Sender;
+use crossbeam::channel;
+use lsp_types::{self, lsp_request, request::Request};
 use serde::{Deserialize, Serialize};
 use serde_json;
+use serde_json::Value as Json;
 use std::{
     collections::BTreeMap,
     io::{self, BufReader},
     process::{self, Command, Stdio},
     thread::JoinHandle,
 };
-
-use channel::{Receiver, Sender};
-use serde_json::Value as Json;
 
 pub struct LsClient {
     process: process::Child,
@@ -101,7 +100,7 @@ impl LsClient {
                 }
                 Some(msg_id) => {
                     // 1. Drain readerctl_rx
-                    for msg in readerctl_rx.try_recv() {
+                    for msg in readerctl_rx.try_iter() {
                         match msg {
                             ReaderControl::Await(id, tx) => {
                                 log::trace!("Drained awaiter for id {}", id);
@@ -135,7 +134,7 @@ impl LsClient {
         let cwd = std::env::current_dir().unwrap();
         let workspace_dir: &str = cwd.to_str().unwrap();
         client
-            .call::<lsp_types::request::Initialize>(initialize_params(workspace_dir))
+            .call::<lsp_request!("initialize")>(initialize_params(workspace_dir))
             .unwrap();
         Ok(client)
     }
@@ -190,13 +189,13 @@ fn test_parse_content_length() {
 struct RpcRequest {
     id: u64,
     method: &'static str,
-    params: serde_json::Value,
+    params: Json,
 }
 
 #[derive(Debug, Serialize)]
 struct RpcNotification {
     method: &'static str,
-    params: serde_json::Value,
+    params: Json,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -209,19 +208,12 @@ struct RpcResponse {
 #[derive(Debug, Deserialize, PartialEq)]
 enum ResponsePayload {
     #[serde(rename = "result")]
-    Result(serde_json::Value),
+    Result(Json),
     #[serde(rename = "error")]
     Error(RpcError),
 }
 
 impl ResponsePayload {
-    fn into_result(self) -> Result<serde_json::Value, RpcError> {
-        match self {
-            ResponsePayload::Result(val) => Ok(val),
-            ResponsePayload::Error(err) => Err(err),
-        }
-    }
-
     fn into_call_result<M>(self) -> CallResult<M>
     where
         M: Request,
@@ -250,7 +242,7 @@ fn test_deserialize_rpc_response() {
     assert_eq!(
         RpcResponse {
             id: Some(69),
-            payload: ResponsePayload::Result(serde_json::Value::String("nice".to_string()))
+            payload: ResponsePayload::Result(Json::String("nice".to_string()))
         },
         serde_json::from_str(json).unwrap()
     );
@@ -279,7 +271,7 @@ fn initialize_params(workspace_path: &str) -> lsp_types::InitializeParams {
     let mut url = Url::parse("file:///").unwrap();
     url.set_path(workspace_path);
     InitializeParams {
-        process_id: Some(std::process::id() as u64),
+        process_id: Some(u64::from(std::process::id())),
         root_path: Some(workspace_path.to_string()),
         root_uri: Some(url),
         initialization_options: None,
