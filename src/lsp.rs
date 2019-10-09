@@ -5,7 +5,7 @@ use lsp_types::{
     InitializeParams, InitializedParams,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{self, json, Value as Json};
+use serde_json::{self, Value as Json};
 use std::{
     borrow::Cow,
     collections::BTreeMap,
@@ -207,11 +207,6 @@ fn parse_content_length(line: &str) -> Option<usize> {
     num.parse().ok()
 }
 
-#[test]
-fn test_parse_content_length() {
-    assert_eq!(37, parse_content_length("Content-Length: 37").unwrap());
-}
-
 #[derive(Debug, Deserialize, PartialEq)]
 /// A JSON-RPC 2.0 message
 #[serde(untagged)]
@@ -254,6 +249,7 @@ impl RawJsonRpc {
         }
     }
 
+    #[allow(dead_code)]
     fn result<P>(id: u64, result: P) -> Self
     where
         P: Serialize,
@@ -264,6 +260,7 @@ impl RawJsonRpc {
         }
     }
 
+    #[allow(dead_code)]
     fn error(id: Option<u64>, error: RpcError) -> Self {
         RawJsonRpc::Error { id, error }
     }
@@ -306,136 +303,10 @@ impl Serialize for RawJsonRpc {
     }
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
-struct RpcResponse {
-    id: Option<u64>,
-    #[serde(flatten)]
-    payload: ResponsePayload,
-}
-
-#[derive(Debug, Deserialize, PartialEq)]
-enum ResponsePayload {
-    #[serde(rename = "result")]
-    Result(Json),
-    #[serde(rename = "error")]
-    Error(RpcError),
-}
-
-impl ResponsePayload {
-    fn into_call_result<M>(self) -> CallResult<M>
-    where
-        M: Request,
-        for<'de> ReqResult<M>: Deserialize<'de>,
-    {
-        match self {
-            ResponsePayload::Result(val) => Ok(serde_json::from_value(val).unwrap()),
-            ResponsePayload::Error(err) => Err(CallError::RpcError(err)),
-        }
-    }
-}
-
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
 pub struct RpcError {
     code: i64,
     message: String,
-}
-
-#[test]
-fn test_raw_jsonrpc_deserialize() {
-    let json = r#"{
-      "jsonrpc": "2.0",
-      "id": 69,
-      "result": "nice"
-    }"#;
-    assert_eq!(
-        RawJsonRpc::result(69, "nice"),
-        serde_json::from_str(json).unwrap()
-    );
-    let json = r#"{
-      "jsonrpc": "2.0",
-      "id": null,
-      "error": {
-        "code": -420,
-        "message": "not nice"
-      }
-    }"#;
-    assert_eq!(
-        RawJsonRpc::error(
-            None,
-            RpcError {
-                code: -420,
-                message: "not nice".to_string()
-            }
-        ),
-        serde_json::from_str(json).unwrap()
-    );
-}
-
-#[test]
-fn test_raw_jsonrpc_serialize() {
-    let test_request = RawJsonRpc::request(427, "hotdogp", ());
-    assert_eq!(
-        json!({
-            "jsonrpc": "2.0",
-            "id": 427,
-            "method": "hotdogp",
-            "params": null,
-        }),
-        serde_json::to_value(test_request).unwrap()
-    );
-
-    let test_error = RawJsonRpc::error(
-        Some(69),
-        RpcError {
-            code: -420,
-            message: "not nice".to_string(),
-        },
-    );
-    assert_eq!(
-        json!({
-            "jsonrpc": "2.0",
-            "id": 69,
-            "error": {
-                "code": -420,
-                "message": "not nice",
-            }
-        }),
-        serde_json::to_value(test_error).unwrap()
-    );
-}
-
-#[test]
-fn test_deserialize_rpc_response() {
-    let json = r#"{
-      "jsonrpc": "2.0",
-      "id": 69,
-      "result": "nice"
-    }"#;
-    assert_eq!(
-        RpcResponse {
-            id: Some(69),
-            payload: ResponsePayload::Result(Json::String("nice".to_string()))
-        },
-        serde_json::from_str(json).unwrap()
-    );
-    let json = r#"{
-      "jsonrpc": "2.0",
-      "id": 69,
-      "error": {
-        "code": -420,
-        "message": "not nice"
-      }
-    }"#;
-    assert_eq!(
-        RpcResponse {
-            id: Some(69),
-            payload: ResponsePayload::Error(RpcError {
-                code: -420,
-                message: "not nice".to_string()
-            })
-        },
-        serde_json::from_str(json).unwrap()
-    );
 }
 
 fn initialize_params(workspace_path: &str) -> InitializeParams {
@@ -450,5 +321,76 @@ fn initialize_params(workspace_path: &str) -> InitializeParams {
         capabilities: ClientCapabilities::default(),
         trace: Some(TraceOption::Verbose),
         workspace_folders: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_parse_content_length() {
+        assert_eq!(37, parse_content_length("Content-Length: 37").unwrap());
+    }
+
+    #[test]
+    fn test_raw_jsonrpc_deserialize() {
+        let json = json!({"jsonrpc": 2.0, "id": 69, "result": "nice"});
+        assert_eq!(
+            RawJsonRpc::result(69, "nice"),
+            serde_json::from_value(json).unwrap()
+        );
+        let json = json!({
+            "jsonrpc": 2.0,
+            "id": null,
+            "error": {
+                "code": -420,
+                "message": "not nice"
+            }
+        });
+        assert_eq!(
+            RawJsonRpc::error(
+                None,
+                RpcError {
+                    code: -420,
+                    message: "not nice".to_string()
+                }
+            ),
+            serde_json::from_value(json).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_raw_jsonrpc_serialize() {
+        let test_request = RawJsonRpc::request(427, "hotdogp", ());
+        assert_eq!(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 427,
+                "method": "hotdogp",
+                "params": null,
+            }),
+            serde_json::to_value(test_request).unwrap()
+        );
+
+        let test_error = RawJsonRpc::error(
+            Some(69),
+            RpcError {
+                code: -420,
+                message: "not nice".to_string(),
+            },
+        );
+        assert_eq!(
+            json!({
+                "jsonrpc": "2.0",
+                "id": 69,
+                "error": {
+                    "code": -420,
+                    "message": "not nice",
+                }
+            }),
+            serde_json::to_value(test_error).unwrap()
+        );
     }
 }
