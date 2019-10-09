@@ -23,10 +23,10 @@ pub struct LsClient {
 }
 
 enum ReaderControl {
-    Await(u64, Sender<RpcResponse>),
+    Await(u64, Sender<Result<Json, RpcError>>),
 }
 enum WriterControl {
-    Request(RpcRequest),
+    Write(RawJsonRpc),
     Shutdown,
 }
 
@@ -64,9 +64,9 @@ impl LsClient {
                 }
             };
             match msg {
-                WriterControl::Request(req) => {
+                WriterControl::Write(req) => {
                     use std::io::Write;
-                    log::trace!("Writing request");
+                    log::trace!("Writing JSON RPC");
                     let json = serde_json::to_string(&req).unwrap();
                     write!(
                         server_stdin,
@@ -90,40 +90,54 @@ impl LsClient {
         let reader_thread = std::thread::spawn(move || loop {
             use std::io::{BufRead, Read};
 
+            log::trace!("Enter top of reader loop");
             let mut read_buf = String::new();
             server_stdout.read_line(&mut read_buf).unwrap();
             let content_len = parse_content_length(&read_buf).expect("Content-Length parse failed");
             server_stdout.read_line(&mut read_buf).unwrap();
             let mut read_buf = vec![0u8; content_len];
             server_stdout.read_exact(&mut read_buf).unwrap();
-            log::trace!("{:?}", std::str::from_utf8(&read_buf).unwrap());
-            let res: RpcResponse = serde_json::from_slice(&read_buf).unwrap();
-            match res.id {
-                None => {
-                    log::info!("Read notification:\n{:?}", res);
-                    // Throw notifications away for now
+            let msg: RawJsonRpc = serde_json::from_slice(&read_buf).unwrap();
+            match msg {
+                // Handle notifications
+                RawJsonRpc::Call {
+                    id: None,
+                    method,
+                    params,
+                } => {
+                    // Throw them away for now
+                    log::info!("Read notification:\nmethod={}\nparams={}", method, params);
                 }
-                Some(msg_id) => {
-                    // 1. Drain readerctl_rx
+                // Handle responses, whether error or result
+                RawJsonRpc::Result { id: msg_id, .. }
+                | RawJsonRpc::Error {
+                    id: Some(msg_id), ..
+                } => {
                     for msg in readerctl_rx.try_iter() {
                         match msg {
-                            ReaderControl::Await(id, tx) => {
-                                log::trace!("Drained awaiter for id {}", id);
-                                awaiters.insert(id, tx);
+                            ReaderControl::Await(await_id, tx) => {
+                                log::trace!("Drained awaiter for id {}", await_id);
+                                awaiters.insert(await_id, tx);
                             }
                         }
                     }
                     log::trace!("Read response for id {}", msg_id);
                     match awaiters.remove(&msg_id) {
-                        Some(response_tx) => response_tx.send(res).unwrap(),
+                        Some(response_tx) => response_tx.send(msg.unwrap_into_result()).unwrap(),
                         None => {
                             log::error!(
                                 "Received response for request {} with no awaiter.\n{:?}",
                                 msg_id,
-                                res
+                                msg
                             );
                         }
                     }
+                }
+                // Handle method calls (respond with error)
+                RawJsonRpc::Call { .. } |
+                // TODO: respond with error
+                _ => {
+                    log::error!("Read unhandled LSP message:\n{:?}", msg);
                 }
             }
         });
@@ -153,20 +167,17 @@ impl LsClient {
         ReqParams<M>: Serialize,
     {
         let id = self.next_id();
-        let request = RpcRequest {
-            id: Some(id),
-            method: M::METHOD,
-            params: serde_json::to_value(params).unwrap(),
-        };
+        let request = RawJsonRpc::request(id, M::METHOD, params);
         let (res_tx, res_rx) = channel::bounded(0);
         self.readerctl_tx
             .send(ReaderControl::Await(id, res_tx))
             .unwrap();
-        self.writer_tx
-            .send(WriterControl::Request(request))
-            .unwrap();
-        let res = res_rx.recv().unwrap().payload;
-        res.into_call_result::<M>()
+        self.writer_tx.send(WriterControl::Write(request)).unwrap();
+        let res = res_rx.recv().unwrap();
+        match res {
+            Ok(val) => Ok(serde_json::from_value(val).unwrap()),
+            Err(e) => Err(CallError::RpcError(e)),
+        }
     }
 
     pub fn notify<N>(&self, params: NotifyParams<N>)
@@ -174,14 +185,8 @@ impl LsClient {
         N: Notification,
         NotifyParams<N>: Serialize,
     {
-        let request = RpcRequest {
-            id: None,
-            method: N::METHOD,
-            params: serde_json::to_value(params).unwrap(),
-        };
-        self.writer_tx
-            .send(WriterControl::Request(request))
-            .unwrap();
+        let request = RawJsonRpc::notification(N::METHOD, params);
+        self.writer_tx.send(WriterControl::Write(request)).unwrap();
     }
 
     pub fn pid(&self) -> u32 {
@@ -207,27 +212,23 @@ fn test_parse_content_length() {
     assert_eq!(37, parse_content_length("Content-Length: 37").unwrap());
 }
 
-#[derive(Debug, Serialize)]
-struct RpcRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<u64>,
-    method: &'static str,
-    params: Json,
-}
-
-#[derive(Debug, Serialize)]
-struct RpcNotification {
-    method: &'static str,
-    params: Json,
-}
-
 #[derive(Debug, Deserialize, PartialEq)]
-/// A raw JSON-RPC 2.0 message
-struct RawJsonRpc {
-    #[serde(default)]
-    id: Option<u64>,
-    #[serde(flatten)]
-    payload: JsonRpcPayload,
+/// A JSON-RPC 2.0 message
+#[serde(untagged)]
+enum RawJsonRpc {
+    Call {
+        id: Option<u64>,
+        method: Cow<'static, str>,
+        params: Json,
+    },
+    Result {
+        id: u64,
+        result: Json,
+    },
+    Error {
+        id: Option<u64>,
+        error: RpcError,
+    },
 }
 
 impl RawJsonRpc {
@@ -235,9 +236,10 @@ impl RawJsonRpc {
     where
         P: Serialize,
     {
-        RawJsonRpc {
+        RawJsonRpc::Call {
             id: Some(id),
-            payload: JsonRpcPayload::call(method, params),
+            method: Cow::Borrowed(method),
+            params: serde_json::to_value(params).unwrap(),
         }
     }
 
@@ -245,9 +247,10 @@ impl RawJsonRpc {
     where
         P: Serialize,
     {
-        RawJsonRpc {
+        RawJsonRpc::Call {
             id: None,
-            payload: JsonRpcPayload::call(method, params),
+            method: Cow::Borrowed(method),
+            params: serde_json::to_value(params).unwrap(),
         }
     }
 
@@ -255,57 +258,22 @@ impl RawJsonRpc {
     where
         P: Serialize,
     {
-        RawJsonRpc {
-            id: None,
-            payload: JsonRpcPayload::result(result),
-        }
-    }
-
-    fn error(id: Option<u64>, error: RpcError) -> Self {
-        RawJsonRpc {
+        RawJsonRpc::Result {
             id,
-            payload: JsonRpcPayload::error(error),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, PartialEq, Serialize)]
-#[serde(untagged)]
-enum JsonRpcPayload {
-    Call {
-        method: Cow<'static, str>,
-        params: Json,
-    },
-    Result {
-        result: Json,
-    },
-    Error {
-        error: RpcError,
-    },
-}
-
-impl JsonRpcPayload {
-    fn call<P>(method: &'static str, params: P) -> JsonRpcPayload
-    where
-        P: Serialize,
-    {
-        JsonRpcPayload::Call {
-            method: Cow::Borrowed(method),
-            params: serde_json::to_value(params).unwrap(),
-        }
-    }
-
-    fn result<R>(result: R) -> JsonRpcPayload
-    where
-        R: Serialize,
-    {
-        JsonRpcPayload::Result {
             result: serde_json::to_value(result).unwrap(),
         }
     }
 
-    fn error(error: RpcError) -> JsonRpcPayload {
-        JsonRpcPayload::Error { error }
+    fn error(id: Option<u64>, error: RpcError) -> Self {
+        RawJsonRpc::Error { id, error }
+    }
+
+    fn unwrap_into_result(self) -> Result<Json, RpcError> {
+        match self {
+            RawJsonRpc::Result { result, .. } => Ok(result),
+            RawJsonRpc::Error { error, .. } => Err(error),
+            _ => panic!("unwrap_into_result() on bad RawJsonRpc: {:?}", self),
+        }
     }
 }
 
@@ -317,18 +285,20 @@ impl Serialize for RawJsonRpc {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("jsonrpc", "2.0")?;
-        if let Some(id) = &self.id {
-            map.serialize_entry("id", &id)?;
-        }
-        match &self.payload {
-            JsonRpcPayload::Call { method, params } => {
+        match &self {
+            RawJsonRpc::Call { id, method, params } => {
+                if let Some(id) = id {
+                    map.serialize_entry("id", &id)?;
+                }
                 map.serialize_entry("method", method)?;
                 map.serialize_entry("params", params)?;
             }
-            JsonRpcPayload::Result { result } => {
+            RawJsonRpc::Result { id, result } => {
+                map.serialize_entry("id", &id)?;
                 map.serialize_entry("result", result)?;
             }
-            JsonRpcPayload::Error { error } => {
+            RawJsonRpc::Error { id, error } => {
+                map.serialize_entry("id", &id)?;
                 map.serialize_entry("error", error)?;
             }
         }
@@ -378,28 +348,25 @@ fn test_raw_jsonrpc_deserialize() {
       "result": "nice"
     }"#;
     assert_eq!(
-        RawJsonRpc {
-            id: Some(69),
-            payload: JsonRpcPayload::result("nice"),
-        },
+        RawJsonRpc::result(69, "nice"),
         serde_json::from_str(json).unwrap()
     );
     let json = r#"{
       "jsonrpc": "2.0",
-      "id": 69,
+      "id": null,
       "error": {
         "code": -420,
         "message": "not nice"
       }
     }"#;
     assert_eq!(
-        RawJsonRpc {
-            id: Some(69),
-            payload: JsonRpcPayload::error(RpcError {
+        RawJsonRpc::error(
+            None,
+            RpcError {
                 code: -420,
                 message: "not nice".to_string()
-            })
-        },
+            }
+        ),
         serde_json::from_str(json).unwrap()
     );
 }
