@@ -182,8 +182,9 @@ impl LsClient {
 
     pub fn workspace_symbol(&self, query: &str) -> CallResult<lsp_request!("workspace/symbol")> {
         type Req = lsp_request!("workspace/symbol");
-        let query = query.into();
-        self.call::<Req>(ReqParams::<Req> { query })
+        self.call::<Req>(ReqParams::<Req> {
+            query: query.to_string(),
+        })
     }
 
     pub fn notify<N>(&self, params: NotifyParams<N>)
