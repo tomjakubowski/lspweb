@@ -5,8 +5,7 @@ use lsp_types::{
     InitializeParams, InitializedParams,
 };
 use serde::{Deserialize, Serialize};
-use serde_json;
-use serde_json::Value as Json;
+use serde_json::{self, json, Value as Json};
 use std::{
     borrow::Cow,
     collections::BTreeMap,
@@ -231,6 +230,45 @@ struct RawJsonRpc {
     payload: JsonRpcPayload,
 }
 
+impl RawJsonRpc {
+    fn request<P>(id: u64, method: &'static str, params: P) -> Self
+    where
+        P: Serialize,
+    {
+        RawJsonRpc {
+            id: Some(id),
+            payload: JsonRpcPayload::call(method, params),
+        }
+    }
+
+    fn notification<P>(method: &'static str, params: P) -> Self
+    where
+        P: Serialize,
+    {
+        RawJsonRpc {
+            id: None,
+            payload: JsonRpcPayload::call(method, params),
+        }
+    }
+
+    fn result<P>(id: u64, result: P) -> Self
+    where
+        P: Serialize,
+    {
+        RawJsonRpc {
+            id: None,
+            payload: JsonRpcPayload::result(result),
+        }
+    }
+
+    fn error(id: Option<u64>, error: RpcError) -> Self {
+        RawJsonRpc {
+            id,
+            payload: JsonRpcPayload::error(error),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
 enum JsonRpcPayload {
@@ -363,6 +401,39 @@ fn test_raw_jsonrpc_deserialize() {
             })
         },
         serde_json::from_str(json).unwrap()
+    );
+}
+
+#[test]
+fn test_raw_jsonrpc_serialize() {
+    let test_request = RawJsonRpc::request(427, "hotdogp", ());
+    assert_eq!(
+        json!({
+            "jsonrpc": "2.0",
+            "id": 427,
+            "method": "hotdogp",
+            "params": null,
+        }),
+        serde_json::to_value(test_request).unwrap()
+    );
+
+    let test_error = RawJsonRpc::error(
+        Some(69),
+        RpcError {
+            code: -420,
+            message: "not nice".to_string(),
+        },
+    );
+    assert_eq!(
+        json!({
+            "jsonrpc": "2.0",
+            "id": 69,
+            "error": {
+                "code": -420,
+                "message": "not nice",
+            }
+        }),
+        serde_json::to_value(test_error).unwrap()
     );
 }
 
