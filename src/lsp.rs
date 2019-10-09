@@ -11,10 +11,12 @@ use std::{
     collections::BTreeMap,
     io::{self, BufReader},
     process::{self, Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
     thread::JoinHandle,
 };
 
 pub struct LsClient {
+    request_counter: AtomicU64,
     process: process::Child,
     reader_thread: JoinHandle<()>,
     readerctl_tx: Sender<ReaderControl>,
@@ -133,9 +135,6 @@ impl LsClient {
                         }
                     }
                 }
-                // Handle method calls (respond with error)
-                RawJsonRpc::Call { .. } |
-                // TODO: respond with error
                 _ => {
                     log::error!("Read unhandled LSP message:\n{:?}", msg);
                 }
@@ -143,6 +142,7 @@ impl LsClient {
         });
 
         let client = LsClient {
+            request_counter: 0.into(),
             process: server,
             reader_thread,
             readerctl_tx,
@@ -166,7 +166,7 @@ impl LsClient {
         for<'de> ReqResult<M>: Deserialize<'de>,
         ReqParams<M>: Serialize,
     {
-        let id = self.next_id();
+        let id = self.next_request_id();
         let request = RawJsonRpc::request(id, M::METHOD, params);
         let (res_tx, res_rx) = channel::bounded(0);
         self.readerctl_tx
@@ -193,9 +193,8 @@ impl LsClient {
         self.process.id()
     }
 
-    pub fn next_id(&self) -> u64 {
-        // FIXME
-        0
+    fn next_request_id(&self) -> u64 {
+        self.request_counter.fetch_add(1, Ordering::Relaxed)
     }
 }
 
