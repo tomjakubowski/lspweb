@@ -51,7 +51,7 @@ impl LsClient {
             .stderr(Stdio::inherit())
             .stdout(Stdio::piped())
             .spawn()?;
-        log::trace!("Language server process started, pid {}", server.id());
+        log::debug!("Language server process started, pid {}", server.id());
         let mut server_stdin = server.stdin.take().unwrap();
         // To shut it down: send message to the writer thread to stop; writer thread closes stdin
         // of server process, which should cause it to exit and close stdout; which will quit the
@@ -68,7 +68,7 @@ impl LsClient {
             match msg {
                 WriterControl::Write(req) => {
                     use std::io::Write;
-                    log::trace!("Writing JSON RPC");
+                    log::trace!("Writing JSON RPC message");
                     let json = serde_json::to_string(&req).unwrap();
                     write!(
                         server_stdin,
@@ -92,7 +92,6 @@ impl LsClient {
         let reader_thread = std::thread::spawn(move || loop {
             use std::io::{BufRead, Read};
 
-            log::trace!("Enter top of reader loop");
             let mut read_buf = String::new();
             server_stdout.read_line(&mut read_buf).unwrap();
             let content_len = parse_content_length(&read_buf).expect("Content-Length parse failed");
@@ -157,6 +156,7 @@ impl LsClient {
             .unwrap();
 
         client.notify::<lsp_notification!("initialized")>(InitializedParams {});
+        log::debug!("LsClient initialized");
         Ok(client)
     }
 
@@ -178,6 +178,12 @@ impl LsClient {
             Ok(val) => Ok(serde_json::from_value(val).unwrap()),
             Err(e) => Err(CallError::RpcError(e)),
         }
+    }
+
+    pub fn workspace_symbol(&self, query: &str) -> CallResult<lsp_request!("workspace/symbol")> {
+        type Req = lsp_request!("workspace/symbol");
+        let query = query.into();
+        self.call::<Req>(ReqParams::<Req> { query })
     }
 
     pub fn notify<N>(&self, params: NotifyParams<N>)
